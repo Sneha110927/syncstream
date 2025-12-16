@@ -1,65 +1,232 @@
-// import Image from "next/image";
+"use client";
 
-// export default function Home() {
-//   return (
-//     <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-//       <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-//         <Image
-//           className="dark:invert"
-//           src="/next.svg"
-//           alt="Next.js logo"
-//           width={100}
-//           height={20}
-//           priority
-//         />
-//         <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-//           <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-//             To get started, edit the page.tsx file.
-//           </h1>
-//           <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-//             Looking for a starting point or more instructions? Head over to{" "}
-//             <a
-//               href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-//               className="font-medium text-zinc-950 dark:text-zinc-50"
-//             >
-//               Templates
-//             </a>{" "}
-//             or the{" "}
-//             <a
-//               href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-//               className="font-medium text-zinc-950 dark:text-zinc-50"
-//             >
-//               Learning
-//             </a>{" "}
-//             center.
-//           </p>
-//         </div>
-//         <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-//           <a
-//             className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-//             href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-//             target="_blank"
-//             rel="noopener noreferrer"
-//           >
-//             <Image
-//               className="dark:invert"
-//               src="/vercel.svg"
-//               alt="Vercel logomark"
-//               width={16}
-//               height={16}
-//             />
-//             Deploy Now
-//           </a>
-//           <a
-//             className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-//             href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-//             target="_blank"
-//             rel="noopener noreferrer"
-//           >
-//             Documentation
-//           </a>
-//         </div>
-//       </main>
-//     </div>
-//   );
-// }
+import { useState, useEffect } from "react";
+import { Header } from "@/components/Header";
+import { RoomControls } from "@/components/RoomControls";
+import { VideoPlayer } from "@/components/VideoPlayer";
+import { LiveChat } from "@/components/LiveChat";
+import { VideoCallPanel } from "@/components/VideoCallPanel";
+import { api } from "@/utils/api";
+import { supabase } from "@/utils/supabase-client";
+
+interface Message {
+  userId: string;
+  username: string;
+  text: string;
+  timestamp: number;
+}
+
+function getErrorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+
+  if (err && typeof err === "object" && "message" in err) {
+    const maybeMessage = (err as { message?: unknown }).message;
+    if (typeof maybeMessage === "string") return maybeMessage;
+  }
+
+  return "Unknown error";
+}
+
+function errorMessageIncludes(err: unknown, needle: string): boolean {
+  return getErrorMessage(err).toLowerCase().includes(needle.toLowerCase());
+}
+
+export default function App() {
+  const [roomId, setRoomId] = useState("");
+  const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [isConnected, setIsConnected] = useState(false);
+  const [videoLoaded, setVideoLoaded] = useState(false);
+  const [userId] = useState("user_" + Math.random().toString(36).substring(2, 10));
+  const [username, setUsername] = useState("User" + Math.floor(Math.random() * 1000));
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [roomUsers, setRoomUsers] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isConnected || !roomId) return;
+
+    const channel = supabase
+      .channel(`room:${roomId}`)
+      .on("broadcast", { event: "room-update" }, (payload) => {
+        console.log("Room update received:", payload);
+        const room = payload.payload as { videoUrl?: string; users?: string[] };
+
+        if (room.videoUrl && room.videoUrl !== youtubeUrl) {
+          setYoutubeUrl(room.videoUrl);
+          setVideoLoaded(true);
+        }
+        if (room.users) {
+          setRoomUsers(room.users);
+        }
+      })
+      .on("broadcast", { event: "chat-message" }, (payload) => {
+        console.log("Chat message received:", payload);
+        const message = payload.payload as Message;
+
+        setMessages((prev) => {
+          if (prev.some((m) => m.timestamp === message.timestamp && m.userId === message.userId)) {
+            return prev;
+          }
+          return [...prev, message];
+        });
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isConnected, roomId, youtubeUrl]);
+
+  useEffect(() => {
+    if (isConnected && roomId) {
+      void loadMessages();
+    }
+  }, [isConnected, roomId]);
+
+  const loadMessages = async () => {
+    try {
+      const { messages: loadedMessages } = await api.getMessages(roomId);
+      setMessages(loadedMessages || []);
+    } catch (err: unknown) {
+      console.error("Error loading messages:", err);
+    }
+  };
+
+  const handleConnect = async () => {
+    if (!roomId.trim()) return;
+
+    setError(null);
+    try {
+      let result: { room: { users?: string[]; videoUrl?: string } };
+
+      try {
+        result = await api.joinRoom(roomId, userId);
+      } catch (err: unknown) {
+        if (errorMessageIncludes(err, "not found")) {
+          result = await api.createRoom(roomId, userId);
+        } else {
+          throw err;
+        }
+      }
+
+      setIsConnected(true);
+      setRoomUsers(result.room.users || []);
+
+      if (result.room.videoUrl) {
+        setYoutubeUrl(result.room.videoUrl);
+        setVideoLoaded(true);
+      }
+    } catch (err: unknown) {
+      console.error("Error connecting to room:", err);
+      setError(getErrorMessage(err) || "Failed to connect to room");
+    }
+  };
+
+  const handleGenerateRoom = () => {
+    const newRoomId = Math.random().toString(36).substring(2, 10).toUpperCase();
+    setRoomId(newRoomId);
+  };
+
+  const handleLoadVideo = async () => {
+    if (!youtubeUrl.trim() || !isConnected) return;
+
+    try {
+      await api.syncVideo(roomId, youtubeUrl);
+      setVideoLoaded(true);
+
+      const channel = supabase.channel(`room:${roomId}`);
+      await channel.send({
+        type: "broadcast",
+        event: "room-update",
+        payload: { videoUrl: youtubeUrl, users: roomUsers },
+      });
+    } catch (err: unknown) {
+      console.error("Error loading video:", err);
+      setError("Failed to load video");
+    }
+  };
+
+  const handleDisconnect = async () => {
+    if (roomId && userId) {
+      try {
+        await api.leaveRoom(roomId, userId);
+      } catch (err: unknown) {
+        console.error("Error leaving room:", err);
+      }
+    }
+
+    setIsConnected(false);
+    setVideoLoaded(false);
+    setMessages([]);
+    setRoomUsers([]);
+    setError(null);
+  };
+
+  const handleSendMessage = async (text: string) => {
+    if (!isConnected || !text.trim()) return;
+
+    try {
+      const { message } = await api.sendMessage(roomId, userId, username, text);
+
+      setMessages((prev) => [...prev, message]);
+
+      const channel = supabase.channel(`room:${roomId}`);
+      await channel.send({
+        type: "broadcast",
+        event: "chat-message",
+        payload: message,
+      });
+    } catch (err: unknown) {
+      console.error("Error sending message:", err);
+      setError("Failed to send message");
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-purple-950 to-slate-900 text-white">
+      <Header />
+
+      {error && (
+        <div className="container mx-auto px-4 py-2 max-w-7xl">
+          <div className="bg-rose-500/20 border border-rose-500/50 text-rose-200 px-4 py-2 rounded-lg backdrop-blur-sm">
+            {error}
+          </div>
+        </div>
+      )}
+
+      <main className="container mx-auto px-4 py-8 max-w-7xl">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2 space-y-6">
+            <RoomControls
+              roomId={roomId}
+              setRoomId={setRoomId}
+              youtubeUrl={youtubeUrl}
+              setYoutubeUrl={setYoutubeUrl}
+              isConnected={isConnected}
+              onConnect={handleConnect}
+              onGenerateRoom={handleGenerateRoom}
+              onLoadVideo={handleLoadVideo}
+              roomUsers={roomUsers}
+            />
+
+            <VideoPlayer videoLoaded={videoLoaded} youtubeUrl={youtubeUrl} isConnected={isConnected} />
+          </div>
+
+          <div className="space-y-6">
+            <LiveChat
+              isConnected={isConnected}
+              username={username}
+              messages={messages}
+              onSendMessage={handleSendMessage}
+              onLogout={handleDisconnect}
+            />
+
+            <VideoCallPanel isConnected={isConnected} />
+          </div>
+        </div>
+      </main>
+    </div>
+  );
+}

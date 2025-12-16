@@ -1,3 +1,5 @@
+"use client";
+
 import { Video, VideoOff } from 'lucide-react';
 import { useState } from 'react';
 
