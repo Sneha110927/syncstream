@@ -1,13 +1,17 @@
 "use client";
 
 import { useState, useEffect } from "react";
+import { useRouter } from "next/navigation";
+
 import { Header } from "@/components/Header";
 import { RoomControls } from "@/components/RoomControls";
 import { VideoPlayer } from "@/components/VideoPlayer";
 import { LiveChat } from "@/components/LiveChat";
 import { VideoCallPanel } from "@/components/VideoCallPanel";
+
 import { api } from "@/utils/api";
-import { supabase } from "@/utils/supabase-client";
+import { supabase } from "@/utils/supabase-client"; // ✅ mock realtime
+import { supabaseAuth } from "@/utils/supabase-auth"; // ✅ real auth
 
 interface Message {
   userId: string;
@@ -24,7 +28,6 @@ function getErrorMessage(err: unknown): string {
     const maybeMessage = (err as { message?: unknown }).message;
     if (typeof maybeMessage === "string") return maybeMessage;
   }
-
   return "Unknown error";
 }
 
@@ -33,35 +36,76 @@ function errorMessageIncludes(err: unknown, needle: string): boolean {
 }
 
 export default function App() {
+  const router = useRouter();
+
+  const [ready, setReady] = useState(false);
+
   const [roomId, setRoomId] = useState("");
   const [youtubeUrl, setYoutubeUrl] = useState("");
   const [isConnected, setIsConnected] = useState(false);
   const [videoLoaded, setVideoLoaded] = useState(false);
-  const [userId] = useState("user_" + Math.random().toString(36).substring(2, 10));
-  const [username, setUsername] = useState("User" + Math.floor(Math.random() * 1000));
+
+  const [userId, setUserId] = useState("");
+  const [username, setUsername] = useState("");
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [roomUsers, setRoomUsers] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
 
+  // ✅ AUTH GUARD
   useEffect(() => {
-    if (!isConnected || !roomId) return;
+    let mounted = true;
+
+    const init = async () => {
+      const { data } = await supabaseAuth.auth.getSession();
+      if (!data.session) {
+        router.replace("/signin");
+        return;
+      }
+
+      const { data: userData } = await supabaseAuth.auth.getUser();
+      const u = userData.user;
+
+      const name =
+        (u?.user_metadata?.full_name as string | undefined) ||
+        (u?.email ? u.email.split("@")[0] : undefined) ||
+        "User";
+
+      if (!mounted) return;
+
+      setUserId(u?.id ?? "");
+      setUsername(name);
+      setReady(true);
+    };
+
+    void init();
+
+    const { data: sub } = supabaseAuth.auth.onAuthStateChange((_evt, session) => {
+      if (!session) router.replace("/signin");
+    });
+
+    return () => {
+      mounted = false;
+      sub.subscription.unsubscribe();
+    };
+  }, [router]);
+
+  // ✅ Realtime subscribe (only when ready + connected)
+  useEffect(() => {
+    if (!ready || !isConnected || !roomId) return;
 
     const channel = supabase
       .channel(`room:${roomId}`)
       .on("broadcast", { event: "room-update" }, (payload) => {
-        console.log("Room update received:", payload);
         const room = payload.payload as { videoUrl?: string; users?: string[] };
 
         if (room.videoUrl && room.videoUrl !== youtubeUrl) {
           setYoutubeUrl(room.videoUrl);
           setVideoLoaded(true);
         }
-        if (room.users) {
-          setRoomUsers(room.users);
-        }
+        if (room.users) setRoomUsers(room.users);
       })
       .on("broadcast", { event: "chat-message" }, (payload) => {
-        console.log("Chat message received:", payload);
         const message = payload.payload as Message;
 
         setMessages((prev) => {
@@ -77,13 +121,13 @@ export default function App() {
       supabase.removeChannel(channel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isConnected, roomId, youtubeUrl]);
+  }, [ready, isConnected, roomId, youtubeUrl]);
 
   useEffect(() => {
-    if (isConnected && roomId) {
-      void loadMessages();
-    }
-  }, [isConnected, roomId]);
+    if (!ready) return;
+    if (isConnected && roomId) void loadMessages();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready, isConnected, roomId]);
 
   const loadMessages = async () => {
     try {
@@ -95,7 +139,7 @@ export default function App() {
   };
 
   const handleConnect = async () => {
-    if (!roomId.trim()) return;
+    if (!roomId.trim() || !userId) return;
 
     setError(null);
     try {
@@ -164,12 +208,17 @@ export default function App() {
     setError(null);
   };
 
+  const handleLogout = async () => {
+    await handleDisconnect();
+    await supabaseAuth.auth.signOut();
+    router.replace("/signin");
+  };
+
   const handleSendMessage = async (text: string) => {
     if (!isConnected || !text.trim()) return;
 
     try {
       const { message } = await api.sendMessage(roomId, userId, username, text);
-
       setMessages((prev) => [...prev, message]);
 
       const channel = supabase.channel(`room:${roomId}`);
@@ -183,6 +232,15 @@ export default function App() {
       setError("Failed to send message");
     }
   };
+
+  // ✅ Render guard INSIDE return (no early return before hooks)
+  if (!ready) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-purple-950 to-slate-900 text-white grid place-items-center">
+        <div className="text-white/70">Loading...</div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-purple-950 to-slate-900 text-white">
@@ -220,7 +278,7 @@ export default function App() {
               username={username}
               messages={messages}
               onSendMessage={handleSendMessage}
-              onLogout={handleDisconnect}
+              onLogout={handleLogout}
             />
 
             <VideoCallPanel isConnected={isConnected} />
